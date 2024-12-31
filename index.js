@@ -9,7 +9,7 @@ const app = express();
 // Middleware to parse JSON and enable CORS
 app.use(express.json());
 app.use(cors({
-    origin: 'http://localhost:5173', // Allow requests from React dev server
+    origin: ['http://localhost:5173', 'https://newphoenixboating.vercel.app'], 
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
