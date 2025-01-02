@@ -9,18 +9,19 @@ const app = express();
 // Middleware to parse JSON and enable CORS
 app.use(express.json());
 app.use(cors({
-    origin: ['http://localhost:5173', 'https://newphoenixboating.vercel.app'], 
+    origin: ['http://localhost:5173', 'https://newphoenixboating.vercel.app'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // Connect to MongoDB
-mongoose.connect('mongodb+srv://newphoenixboatingadventures:JjnfYLh186XhVekw@cluster0.as3mi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0', {
+mongoose.connect('mongodb+srv://kiruba:kirubakaran23@creeper.fg9oh.mongodb.net/', {
     useNewUrlParser: true,
     useUnifiedTopology: true
 })
 .then(() => console.log('MongoDB connected successfully'))
 .catch(err => console.log('MongoDB connection error:', err));
+
 const bookingSchema = new mongoose.Schema({
     name: String,
     date: Date,
@@ -28,7 +29,14 @@ const bookingSchema = new mongoose.Schema({
     phoneNumber: String
 });
 
+const emailSchema = new mongoose.Schema({
+    name: String,
+    email: String,
+    message: String
+});
+
 const Booking = mongoose.model('Booking', bookingSchema);
+const Email = mongoose.model('Email', emailSchema);
 
 // Generate JWT Token
 const generateToken = (email) => {
@@ -84,6 +92,49 @@ const verifyToken = (req, res, next) => {
         return res.status(401).json({ success: false, message: 'Invalid or expired token' });
     }
 };
+
+// Email endpoints
+app.post('/api/email', async (req, res) => {
+    try {
+        const { name, email, message } = req.body;
+
+        const emailEntry = new Email({
+            name,
+            email,
+            message
+        });
+
+        await emailEntry.save();
+
+        res.status(201).json({
+            success: true,
+            message: 'Email entry created successfully',
+            emailEntry
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error creating email entry',
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/getemail', verifyToken, async (req, res) => {
+    try {
+        const emails = await Email.find();
+        res.status(200).json({
+            success: true,
+            emails
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching emails',
+            error: error.message
+        });
+    }
+});
 
 // Create booking endpoint (requires authentication)
 app.post('/api/bookings', async (req, res) => {
