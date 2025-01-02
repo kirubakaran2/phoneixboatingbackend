@@ -136,6 +136,31 @@ app.get('/api/getemail', verifyToken, async (req, res) => {
     }
 });
 
+// Delete email endpoint (requires authentication)
+app.delete('/api/email/:id', verifyToken, async (req, res) => {
+    try {
+        const email = await Email.findByIdAndDelete(req.params.id);
+        
+        if (!email) {
+            return res.status(404).json({
+                success: false,
+                message: 'Email not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Email deleted successfully'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting email',
+            error: error.message
+        });
+    }
+});
+
 // Create booking endpoint (requires authentication)
 app.post('/api/bookings', async (req, res) => {
     try {
