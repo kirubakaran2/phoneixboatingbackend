@@ -58,7 +58,7 @@ const vapidKeys = {
 
 // Set VAPID details
 webPush.setVapidDetails(
-    'mailto:your-email@example.com', // Your email
+    'mailto:kirubakaran003k2@gmail.com', // Your email
     vapidKeys.publicKey,
     vapidKeys.privateKey
 );
