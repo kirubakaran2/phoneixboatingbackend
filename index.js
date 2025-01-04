@@ -197,6 +197,119 @@ app.post('/api/bookings', async (req, res) => {
         });
     }
 });
+app.get('/api/bookings', verifyToken, async (req, res) => {
+    try {
+        const bookings = await Booking.find();
+        res.status(200).json({
+            success: true,
+            bookings
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching bookings',
+            error: error.message
+        });
+    }
+});
+
+// Update booking endpoint (requires authentication)
+app.put('/api/bookings/:id', verifyToken, async (req, res) => {
+    try {
+        const { name, date, timeSlot, phoneNumber } = req.body;
+        
+        const booking = await Booking.findByIdAndUpdate(
+            req.params.id,
+            { name, date, timeSlot, phoneNumber },
+            { new: true } // Return updated document
+        );
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Booking not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Booking updated successfully',
+            booking
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error updating booking',
+            error: error.message
+        });
+    }
+});
+
+// Delete booking endpoint (requires authentication)
+app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
+    try {
+        const booking = await Booking.findByIdAndDelete(req.params.id);
+        
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Booking not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Booking deleted successfully'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting booking',
+            error: error.message
+        });
+    }
+});
+app.get('/api/getemail', verifyToken, async (req, res) => {
+    try {
+        const emails = await Email.find();
+        res.status(200).json({
+            success: true,
+            emails
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching emails',
+            error: error.message
+        });
+    }
+});
+
+// Delete email endpoint (requires authentication)
+app.delete('/api/email/:id', verifyToken, async (req, res) => {
+    try {
+        const email = await Email.findByIdAndDelete(req.params.id);
+        
+        if (!email) {
+            return res.status(404).json({
+                success: false,
+                message: 'Email not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Email deleted successfully'
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting email',
+            error: error.message
+        });
+    }
+});
+
 
 // Start the server
 const PORT = process.env.PORT || 3000;
