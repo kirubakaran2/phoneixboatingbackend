@@ -25,31 +25,41 @@ mongoose.connect('mongodb+srv://kiruba:kirubakaran23@creeper.fg9oh.mongodb.net/'
 
 // Define schemas
 const bookingSchema = new mongoose.Schema({
-    name: String,
-    date: Date,
-    timeSlot: String,
-    phoneNumber: String
+    name: { type: String, required: true },
+    date: { type: Date, required: true },
+    timeSlot: { type: String, required: true },
+    phoneNumber: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
 });
 
 const emailSchema = new mongoose.Schema({
-    name: String,
-    email: String,
-    message: String
+    name: { type: String, required: true },
+    email: { type: String, required: true },
+    message: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
 });
 
 const subscriptionSchema = new mongoose.Schema({
-    endpoint: String,
+    endpoint: { type: String, required: true, unique: true },
     keys: {
-        auth: String,
-        p256dh: String
-    }
+        auth: { type: String, required: true },
+        p256dh: { type: String, required: true }
+    },
+    userAgent: String,
+    createdAt: { type: Date, default: Date.now }
+});
+
+const notificationLogSchema = new mongoose.Schema({
+    type: { type: String, required: true }, // 'booking' or 'email'
+    referenceId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    createdAt: { type: Date, default: Date.now, expires: 86400 }
 });
 
 // Create models
 const Booking = mongoose.model('Booking', bookingSchema);
 const Email = mongoose.model('Email', emailSchema);
 const Subscription = mongoose.model('Subscription', subscriptionSchema);
-
+const NotificationLog = mongoose.model('NotificationLog', notificationLogSchema);
 // VAPID keys
 const vapidKeys = {
     publicKey: 'BJSGv5raHxSFIvnQB493vrLqXCtGnpLfm1Yzw4nS9X67d4nh6pktfHewpyzajnAR0VjHg8G6qrKPeldQUqf13s0',
@@ -65,14 +75,49 @@ webPush.setVapidDetails(
 
 // Generate JWT Token
 const generateToken = (email) => {
-    const secretKey = process.env.JWT_SECRET; // Fetch secret key from .env file
-
-    if (!secretKey) {
-        throw new Error('JWT_SECRET is not defined in .env file');
-    }
-
-    return jwt.sign({ email }, secretKey, { expiresIn: '1h' });
+    return jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '24h' });
 };
+
+async function sendNotification(type, title, body, referenceId) {
+    try {
+        // Check for duplicate notification
+        const existingLog = await NotificationLog.findOne({ type, referenceId });
+        if (existingLog) {
+            console.log('Duplicate notification prevented');
+            return;
+        }
+
+        const subscriptions = await Subscription.find();
+        const payload = JSON.stringify({
+            title,
+            body,
+            timestamp: Date.now(),
+            type,
+            referenceId: referenceId.toString()
+        });
+
+        // Send to all valid subscriptions
+        const sendPromises = subscriptions.map(async subscription => {
+            try {
+                await webPush.sendNotification(subscription, payload);
+            } catch (error) {
+                if (error.statusCode === 410 || error.statusCode === 404) {
+                    // Remove invalid subscription
+                    await Subscription.deleteOne({ _id: subscription._id });
+                }
+                console.error(`Notification error: ${error.message}`);
+            }
+        });
+
+        await Promise.all(sendPromises);
+
+        // Log successful notification
+        await new NotificationLog({ type, referenceId }).save();
+        
+    } catch (error) {
+        console.error('Notification error:', error);
+    }
+}
 
 // Login endpoint to authenticate and generate token
 app.post('/api/signin', async (req, res) => {
@@ -114,18 +159,22 @@ const verifyToken = (req, res, next) => {
 };
 
 // Subscription endpoint
-// Subscription endpoint
 app.post('/api/subscribe', async (req, res) => {
-    const subscription = req.body;
-  
     try {
-      const newSubscription = new Subscription(subscription);
-      await newSubscription.save();
-      res.status(201).json({ success: true, message: 'Subscription saved successfully' });
+        const subscription = req.body;
+        const userAgent = req.headers['user-agent'];
+
+        await Subscription.findOneAndUpdate(
+            { endpoint: subscription.endpoint },
+            { ...subscription, userAgent },
+            { upsert: true, new: true }
+        );
+
+        res.status(201).json({ success: true });
     } catch (error) {
-      res.status(500).json({ success: false, message: 'Error saving subscription', error: error.message });
+        res.status(500).json({ success: false, error: error.message });
     }
-  });
+});
 
 // Email endpoints
 app.post('/api/email', async (req, res) => {
@@ -165,51 +214,27 @@ app.post('/api/email', async (req, res) => {
 // Booking endpoints
 app.post('/api/bookings', async (req, res) => {
     try {
-        const { name, date, timeSlot, phoneNumber } = req.body;
-
-        const booking = new Booking({
-            name,
-            date,
-            timeSlot,
-            phoneNumber
-        });
-
+        const booking = new Booking(req.body);
         await booking.save();
 
-        // Send push notification
-        const subscriptions = await Subscription.find();
-        const payload = JSON.stringify({ title: 'New Booking', body: `New booking for ${name} on ${date}` });
+        await sendNotification(
+            'booking',
+            'New Booking Received',
+            `${booking.name} booked for ${new Date(booking.date).toLocaleDateString()} at ${booking.timeSlot}`,
+            booking._id
+        );
 
-        subscriptions.forEach(subscription => {
-            webPush.sendNotification(subscription, payload).catch(err => console.error('Error sending notification:', err));
-        });
-
-        res.status(201).json({
-            success: true,
-            message: 'Booking created successfully',
-            booking
-        });
+        res.status(201).json({ success: true, booking });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Error creating booking',
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 app.get('/api/bookings', verifyToken, async (req, res) => {
     try {
-        const bookings = await Booking.find();
-        res.status(200).json({
-            success: true,
-            bookings
-        });
+        const bookings = await Booking.find().sort({ date: 1 });
+        res.json({ success: true, bookings });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching bookings',
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
@@ -244,75 +269,54 @@ app.put('/api/bookings/:id', verifyToken, async (req, res) => {
         });
     }
 });
-
-// Delete booking endpoint (requires authentication)
 app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
     try {
-        const booking = await Booking.findByIdAndDelete(req.params.id);
-        
-        if (!booking) {
-            return res.status(404).json({
-                success: false,
-                message: 'Booking not found'
-            });
-        }
-
-        res.status(200).json({
-            success: true,
-            message: 'Booking deleted successfully'
-        });
+        await Booking.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Error deleting booking',
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
-app.get('/api/getemail', verifyToken, async (req, res) => {
+
+// Email Routes
+app.post('/api/email', async (req, res) => {
     try {
-        const emails = await Email.find();
-        res.status(200).json({
-            success: true,
-            emails
-        });
+        const email = new Email(req.body);
+        await email.save();
+
+        await sendNotification(
+            'email',
+            'New Message Received',
+            `New message from ${email.name} (${email.email})`,
+            email._id
+        );
+
+        res.status(201).json({ success: true, email });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Error fetching emails',
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Delete email endpoint (requires authentication)
-app.delete('/api/email/:id', verifyToken, async (req, res) => {
+app.get('/api/emails', verifyToken, async (req, res) => {
     try {
-        const email = await Email.findByIdAndDelete(req.params.id);
-        
-        if (!email) {
-            return res.status(404).json({
-                success: false,
-                message: 'Email not found'
-            });
-        }
-
-        res.status(200).json({
-            success: true,
-            message: 'Email deleted successfully'
-        });
+        const emails = await Email.find().sort({ createdAt: -1 });
+        res.json({ success: true, emails });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Error deleting email',
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
+app.delete('/api/emails/:id', verifyToken, async (req, res) => {
+    try {
+        await Email.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
-// Start the server
+// Server startup
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
