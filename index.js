@@ -245,6 +245,20 @@ app.post('/api/bookings', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+const verifyToken = (req, res, next) => {
+    const token = req.headers['authorization']?.split(' ')[1];
+
+    if (!token) {
+        return res.status(403).json({ success: false, message: 'Token is required' });
+    }
+
+    try {
+        jwt.verify(token, process.env.JWT_SECRET);
+        next();
+    } catch (error) {
+        return res.status(401).json({ success: false, message: 'Invalid or expired token' });
+    }
+};
 app.get('/api/bookings', verifyToken, async (req, res) => {
     try {
         const bookings = await Booking.find().sort({ date: 1 });
