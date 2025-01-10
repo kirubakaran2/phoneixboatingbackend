@@ -198,6 +198,27 @@ class NotificationService {
         }
     }
 }
+app.post('/api/signin', async (req, res) => {
+    const { email, password } = req.body;
+
+    if ((email === 'Newphoenixboatingadventures@gmail.com' && 
+         password === 'Newphoenixboatingadventures@1') ||
+        (email === 'kirubakaran003k2@gmail.com' &&
+         password === 'kirubakaran003k2')) {
+
+        const token = generateToken(email);
+        return res.status(200).json({
+            success: true,
+            message: 'Login successful',
+            token
+        });
+    }
+
+    return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+    });
+});
 
 // Token registration endpoint with validation
 app.post('/api/register-device', async (req, res) => {
