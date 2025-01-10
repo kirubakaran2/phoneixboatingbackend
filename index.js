@@ -245,6 +245,39 @@ app.post('/api/bookings', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+app.get('/api/bookings', verifyToken, async (req, res) => {
+    try {
+        const bookings = await Booking.find().sort({ date: 1 });
+        res.json({ success: true, bookings });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
+    try {
+        await Booking.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+app.get('/api/email', verifyToken, async (req, res) => {
+    try {
+        const emails = await Email.find().sort({ createdAt: -1 });
+        res.json({ success: true, emails });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.delete('/api/emails/:id', verifyToken, async (req, res) => {
+    try {
+        await Email.findByIdAndDelete(req.params.id);
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 
 // Enhanced email endpoint with notification
 app.post('/api/email', async (req, res) => {
