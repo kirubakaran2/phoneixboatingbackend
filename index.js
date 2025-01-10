@@ -198,6 +198,9 @@ class NotificationService {
         }
     }
 }
+const generateToken = (email) => {
+    return jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '24h' });
+};
 app.post('/api/signin', async (req, res) => {
     const { email, password } = req.body;
 
