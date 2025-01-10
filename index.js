@@ -6,12 +6,11 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const fs = require('fs');
 
+// Initialize Firebase Admin SDK
 try {
-    // Read the file synchronously to ensure it's loaded before initialization
     const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
     const serviceAccount = JSON.parse(serviceAccountRaw);
     
-    // Log some non-sensitive details for verification
     console.log('Loading service account for project:', serviceAccount.project_id);
     
     // Ensure the private key is properly formatted
@@ -20,11 +19,7 @@ try {
     }
     
     admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: serviceAccount.project_id,
-            clientEmail: serviceAccount.client_email,
-            privateKey: serviceAccount.private_key
-        })
+        credential: admin.credential.cert(serviceAccount)
     });
     
     console.log('Firebase Admin SDK initialized successfully');
@@ -38,16 +33,14 @@ try {
 }
 
 const messaging = admin.messaging();
-
 const app = express();
 
-// Enhanced CORS configuration with error handling
+// CORS configuration
 app.use(cors({
     origin: ['http://localhost:5173', 'https://newphoenixboating.vercel.app', 'https://newphoenixboating.in', 'https://www.newphoenixboating.in'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
-    maxAge: 86400 // CORS preflight cache time
 }));
 
 app.use(express.json());
@@ -56,7 +49,7 @@ app.use(express.json());
 const connectDB = async (retries = 5) => {
     while (retries) {
         try {
-            await mongoose.connect('mongodb+srv://kiruba:kirubakaran23@creeper.fg9oh.mongodb.net/', {
+            await mongoose.connect(process.env.MONGODB_URI, { // Use environment variable for MongoDB URI
                 useNewUrlParser: true,
                 useUnifiedTopology: true
             });
@@ -74,7 +67,7 @@ const connectDB = async (retries = 5) => {
 
 connectDB();
 
-// Enhanced schemas with timestamps and indexes
+// Define Mongoose schemas
 const bookingSchema = new mongoose.Schema({
     name: { type: String, required: true, index: true },
     date: { type: Date, required: true, index: true },
@@ -127,12 +120,13 @@ const notificationLogSchema = new mongoose.Schema({
     expires: 86400 // TTL index
 });
 
+// Create Mongoose models
 const Booking = mongoose.model('Booking', bookingSchema);
 const Email = mongoose.model('Email', emailSchema);
 const DeviceToken = mongoose.model('DeviceToken', deviceTokenSchema);
 const NotificationLog = mongoose.model('NotificationLog', notificationLogSchema);
 
-// Enhanced notification service with retry logic and batch processing
+// Notification service class
 class NotificationService {
     static async sendNotification(type, title, body, referenceId, retryCount = 3) {
         try {
@@ -166,7 +160,6 @@ class NotificationService {
 
             // Validate tokens before sending
             const tokens = devices.map(device => device.token).filter(token => {
-                // Basic token validation
                 if (!token || token.length < 100) {
                     console.log('Invalid token format:', token);
                     return false;
@@ -181,47 +174,43 @@ class NotificationService {
                 const batch = tokens.slice(i, i + 500);
                 
                 // Create message objects for each token
-                const messages = batch.map(token => {
-                    console.log('Preparing message for token:', token);
-                    return {
-                        token,
-                        notification: { 
-                            title, 
-                            body 
+                const messages = batch.map(token => ({
+                    token,
+                    notification: { 
+                        title, 
+                        body 
+                    },
+                    data: {
+                        type,
+                        referenceId: referenceId.toString(),
+                        timestamp: Date.now().toString()
+                    },
+                    android: {
+                        priority: 'high',
+                        notification: {
+                            clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+                        }
+                    },
+                    apns: {
+                        headers: {
+                            'apns-priority': '10'
                         },
-                        data: {
-                            type,
-                            referenceId: referenceId.toString(),
-                            timestamp: Date.now().toString()
-                        },
-                        android: {
-                            priority: 'high',
-                            notification: {
-                                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-                            }
-                        },
-                        apns: {
-                            headers: {
-                                'apns-priority': '10'
-                            },
-                            payload: {
-                                aps: {
-                                    contentAvailable: true,
-                                    alert: {
-                                        title,
-                                        body
-                                    }
+                        payload: {
+                            aps: {
+                                contentAvailable: true,
+                                alert: {
+                                    title,
+                                    body
                                 }
                             }
                         }
-                    };
-                });
+                    }
+                }));
 
                 try {
                     console.log(`Sending batch of ${messages.length} messages...`);
-                    const response = await messaging.sendEach(messages);
+                    const response = await messaging.sendAll(messages); // Use sendAll for batch sending
 
-                    // Detailed response logging
                     console.log('Batch response:', {
                         successCount: response.successCount,
                         failureCount: response.failureCount
@@ -295,9 +284,11 @@ class NotificationService {
         }
     }
 }
+
 const generateToken = (email) => {
     return jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '24h' });
 };
+
 app.post('/api/signin', async (req, res) => {
     const { email, password } = req.body;
 
@@ -318,9 +309,6 @@ app.post('/api/signin', async (req, res) => {
         success: false,
         message: 'Invalid email or password'
     });
-});
-app.get('/api/current-time', (req, res) => {
-    res.json({ currentTime: new Date() });
 });
 
 // Token registration endpoint with validation
@@ -369,6 +357,7 @@ app.post('/api/bookings', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
 const verifyToken = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
 
@@ -383,6 +372,7 @@ const verifyToken = (req, res, next) => {
         return res.status(401).json({ success: false, message: 'Invalid or expired token' });
     }
 };
+
 app.get('/api/bookings', verifyToken, async (req, res) => {
     try {
         const bookings = await Booking.find().sort({ date: 1 });
@@ -391,6 +381,7 @@ app.get('/api/bookings', verifyToken, async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
 app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
     try {
         await Booking.findByIdAndDelete(req.params.id);
@@ -399,6 +390,7 @@ app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
 app.get('/api/email', verifyToken, async (req, res) => {
     try {
         const emails = await Email.find().sort({ createdAt: -1 });
@@ -436,9 +428,6 @@ app.post('/api/email', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
-// Keep existing routes...
-// [Previous routes remain unchanged]
 
 // Error handling middleware
 app.use((err, req, res, next) => {
