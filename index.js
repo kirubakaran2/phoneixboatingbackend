@@ -153,6 +153,7 @@ class NotificationService {
                 tokens: tokens.slice(0, 500) // Firebase limits to 500 tokens per request
             };
 
+            // Use sendMulticast to send notifications to multiple tokens
             const response = await messaging.sendMulticast(message);
 
             // Handle failed tokens
