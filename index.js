@@ -4,14 +4,36 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const fs = require('fs');
 
-// Initialize Firebase Admin SDK with proper error handling
 try {
+    // Read the file synchronously to ensure it's loaded before initialization
+    const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
+    const serviceAccount = JSON.parse(serviceAccountRaw);
+    
+    // Log some non-sensitive details for verification
+    console.log('Loading service account for project:', serviceAccount.project_id);
+    
+    // Ensure the private key is properly formatted
+    if (serviceAccount.private_key.includes('\\n')) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+    
     admin.initializeApp({
-        credential: admin.credential.applicationDefault(),
+        credential: admin.credential.cert({
+            projectId: serviceAccount.project_id,
+            clientEmail: serviceAccount.client_email,
+            privateKey: serviceAccount.private_key
+        })
     });
+    
+    console.log('Firebase Admin SDK initialized successfully');
 } catch (error) {
-    console.error('Firebase initialization error:', error);
+    console.error('Firebase initialization error:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+    });
     process.exit(1);
 }
 
@@ -118,7 +140,7 @@ class NotificationService {
             const recentNotification = await NotificationLog.findOne({
                 type,
                 referenceId,
-                createdAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) } // 5 minutes window
+                createdAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) }
             });
 
             if (recentNotification) {
@@ -142,36 +164,106 @@ class NotificationService {
                 return;
             }
 
-            const tokens = devices.map(device => device.token);
-            const message = {
-                notification: { title, body },
-                data: {
-                    type,
-                    referenceId: referenceId.toString(),
-                    timestamp: Date.now().toString()
-                },
-                tokens: tokens.slice(0, 500) // Firebase limits to 500 tokens per request
-            };
+            // Validate tokens before sending
+            const tokens = devices.map(device => device.token).filter(token => {
+                // Basic token validation
+                if (!token || token.length < 100) {
+                    console.log('Invalid token format:', token);
+                    return false;
+                }
+                return true;
+            });
 
-            // Use sendMulticast to send notifications to multiple tokens
-            const response = await messaging.sendMulticast(message);
+            console.log(`Attempting to send notifications to ${tokens.length} devices`);
 
-            // Handle failed tokens
-            if (response.failureCount > 0) {
-                const failedTokens = [];
-                response.responses.forEach((resp, idx) => {
-                    if (!resp.success) {
-                        failedTokens.push(tokens[idx]);
-                        if (resp.error.code === 'messaging/invalid-registration-token' ||
-                            resp.error.code === 'messaging/registration-token-not-registered') {
-                            DeviceToken.findOneAndUpdate(
-                                { token: tokens[idx] },
-                                { isValid: false }
-                            ).exec();
+            // Process tokens in batches of 500
+            for (let i = 0; i < tokens.length; i += 500) {
+                const batch = tokens.slice(i, i + 500);
+                
+                // Create message objects for each token
+                const messages = batch.map(token => {
+                    console.log('Preparing message for token:', token);
+                    return {
+                        token,
+                        notification: { 
+                            title, 
+                            body 
+                        },
+                        data: {
+                            type,
+                            referenceId: referenceId.toString(),
+                            timestamp: Date.now().toString()
+                        },
+                        android: {
+                            priority: 'high',
+                            notification: {
+                                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
+                            }
+                        },
+                        apns: {
+                            headers: {
+                                'apns-priority': '10'
+                            },
+                            payload: {
+                                aps: {
+                                    contentAvailable: true,
+                                    alert: {
+                                        title,
+                                        body
+                                    }
+                                }
+                            }
                         }
-                    }
+                    };
                 });
-                console.log('Failed tokens:', failedTokens);
+
+                try {
+                    console.log(`Sending batch of ${messages.length} messages...`);
+                    const response = await messaging.sendEach(messages);
+
+                    // Detailed response logging
+                    console.log('Batch response:', {
+                        successCount: response.successCount,
+                        failureCount: response.failureCount
+                    });
+
+                    // Handle failed tokens
+                    if (response.failureCount > 0) {
+                        const failedTokens = [];
+                        response.responses.forEach((resp, idx) => {
+                            if (!resp.success) {
+                                const failedToken = batch[idx];
+                                failedTokens.push(failedToken);
+                                console.log('Failure details:', {
+                                    token: failedToken,
+                                    error: resp.error
+                                });
+
+                                if (resp.error.code === 'messaging/invalid-registration-token' ||
+                                    resp.error.code === 'messaging/registration-token-not-registered') {
+                                    console.log('Invalidating token:', failedToken);
+                                    DeviceToken.findOneAndUpdate(
+                                        { token: failedToken },
+                                        { isValid: false },
+                                        { new: true }
+                                    ).exec().then(result => {
+                                        console.log('Token invalidation result:', result);
+                                    });
+                                }
+                            }
+                        });
+                        console.log('Failed tokens:', failedTokens);
+                    }
+
+                    console.log(`Successfully sent ${response.successCount} messages in batch`);
+                } catch (error) {
+                    console.error('Batch send error:', {
+                        code: error.code,
+                        message: error.message,
+                        stack: error.stack,
+                        details: error.errorInfo
+                    });
+                }
             }
 
             // Update notification log
@@ -181,11 +273,15 @@ class NotificationService {
             });
 
         } catch (error) {
-            console.error('Error sending notification:', error);
+            console.error('Notification service error:', {
+                code: error.code,
+                message: error.message,
+                stack: error.stack,
+                details: error.errorInfo
+            });
             
             const notificationLog = await NotificationLog.findOne({ type, referenceId });
             if (notificationLog && notificationLog.retryCount < retryCount) {
-                // Retry after exponential backoff
                 const delay = Math.pow(2, notificationLog.retryCount) * 1000;
                 setTimeout(() => {
                     NotificationService.sendNotification(type, title, body, referenceId, retryCount);
