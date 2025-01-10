@@ -4,11 +4,15 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const admin = require('firebase-admin');
-const fs = require('fs');
 
 try {
-    // Read the file synchronously to ensure it's loaded before initialization
-    const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
+    // Read the service account from the environment variable
+    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+    if (!serviceAccountRaw) {
+        throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is not set');
+    }
+
     const serviceAccount = JSON.parse(serviceAccountRaw);
     
     // Log some non-sensitive details for verification
