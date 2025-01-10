@@ -319,6 +319,9 @@ app.post('/api/signin', async (req, res) => {
         message: 'Invalid email or password'
     });
 });
+app.get('/api/current-time', (req, res) => {
+    res.json({ currentTime: new Date() });
+});
 
 // Token registration endpoint with validation
 app.post('/api/register-device', async (req, res) => {
