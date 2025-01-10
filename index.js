@@ -5,39 +5,52 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const fs = require('fs');
+const fetch = require('node-fetch');
 
-try {
-    // Read the file synchronously to ensure it's loaded before initialization
-    const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
-    const serviceAccount = JSON.parse(serviceAccountRaw);
-    
-    // Log some non-sensitive details for verification
-    console.log('Loading service account for project:', serviceAccount.project_id);
-    
-    // Ensure the private key is properly formatted
-    if (serviceAccount.private_key.includes('\\n')) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+// Initialize Firebase
+const initializeFirebase = async () => {
+    try {
+        // Read and validate service account
+        const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+        const serviceAccount = JSON.parse(serviceAccountRaw);
+
+        // Validate required fields
+        const requiredFields = ['project_id', 'private_key', 'client_email'];
+        for (const field of requiredFields) {
+            if (!serviceAccount[field]) {
+                throw new Error(`Missing required field: ${field}`);
+            }
+        }
+
+        // Clean private key formatting
+        const privateKey = serviceAccount.private_key.replace(/\\n/g, '\n');
+
+        // Initialize Firebase Admin SDK
+        if (admin.apps.length) {
+            await admin.app().delete();
+        }
+
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId: serviceAccount.project_id,
+                clientEmail: serviceAccount.client_email,
+                privateKey: privateKey
+            })
+        });
+
+        console.log('Firebase Admin SDK initialized successfully');
+        return admin.messaging();
+    } catch (error) {
+        console.error('Firebase initialization failed:', {
+            name: error.name,
+            message: error.message,
+            stack: error.stack
+        });
+        throw error;
     }
-    
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: serviceAccount.project_id,
-            clientEmail: serviceAccount.client_email,
-            privateKey: serviceAccount.private_key
-        })
-    });
-    
-    console.log('Firebase Admin SDK initialized successfully');
-} catch (error) {
-    console.error('Firebase initialization error:', {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
-    });
-    process.exit(1);
-}
+};
 
-const messaging = admin.messaging();
+const messaging = initializeFirebase();
 
 const app = express();
 
