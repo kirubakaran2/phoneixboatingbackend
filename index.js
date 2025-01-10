@@ -5,52 +5,39 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const admin = require('firebase-admin');
 const fs = require('fs');
-const fetch = require('node-fetch');
 
-// Initialize Firebase
-const initializeFirebase = async () => {
-    try {
-        // Read and validate service account
-        const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-        const serviceAccount = JSON.parse(serviceAccountRaw);
-
-        // Validate required fields
-        const requiredFields = ['project_id', 'private_key', 'client_email'];
-        for (const field of requiredFields) {
-            if (!serviceAccount[field]) {
-                throw new Error(`Missing required field: ${field}`);
-            }
-        }
-
-        // Clean private key formatting
-        const privateKey = serviceAccount.private_key.replace(/\\n/g, '\n');
-
-        // Initialize Firebase Admin SDK
-        if (admin.apps.length) {
-            await admin.app().delete();
-        }
-
-        admin.initializeApp({
-            credential: admin.credential.cert({
-                projectId: serviceAccount.project_id,
-                clientEmail: serviceAccount.client_email,
-                privateKey: privateKey
-            })
-        });
-
-        console.log('Firebase Admin SDK initialized successfully');
-        return admin.messaging();
-    } catch (error) {
-        console.error('Firebase initialization failed:', {
-            name: error.name,
-            message: error.message,
-            stack: error.stack
-        });
-        throw error;
+try {
+    // Read the file synchronously to ensure it's loaded before initialization
+    const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
+    const serviceAccount = JSON.parse(serviceAccountRaw);
+    
+    // Log some non-sensitive details for verification
+    console.log('Loading service account for project:', serviceAccount.project_id);
+    
+    // Ensure the private key is properly formatted
+    if (serviceAccount.private_key.includes('\\n')) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-};
+    
+    admin.initializeApp({
+        credential: admin.credential.cert({
+            projectId: serviceAccount.project_id,
+            clientEmail: serviceAccount.client_email,
+            privateKey: serviceAccount.private_key
+        })
+    });
+    
+    console.log('Firebase Admin SDK initialized successfully');
+} catch (error) {
+    console.error('Firebase initialization error:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+    });
+    process.exit(1);
+}
 
-const messaging = initializeFirebase();
+const messaging = admin.messaging();
 
 const app = express();
 
@@ -64,87 +51,6 @@ app.use(cors({
 }));
 
 app.use(express.json());
-
-const checkServerTime = async () => {
-    try {
-        const response = await fetch('https://worldtimeapi.org/api/ip');
-        const { unixtime } = await response.json();
-        const localTime = Math.floor(Date.now() / 1000);
-        const timeDiff = Math.abs(unixtime - localTime);
-        
-        if (timeDiff > 300) { // 5 minutes threshold
-            console.error(`Server time is out of sync. Difference: ${timeDiff} seconds`);
-            return false;
-        }
-        return true;
-    } catch (error) {
-        console.error('Failed to check server time:', error);
-        return true; // Continue anyway if check fails
-    }
-};
-
-// Enhanced Firebase initialization
-const initializeFirebase = async () => {
-    try {
-        const isTimeSync = await checkServerTime();
-        if (!isTimeSync) {
-            console.warn('Server time sync issue detected - this may cause authentication problems');
-        }
-
-        // Read and validate service account
-        const serviceAccountRaw = fs.readFileSync('./firebase-service-account.json', 'utf8');
-        const serviceAccount = JSON.parse(serviceAccountRaw);
-        
-        // Validate required fields
-        const requiredFields = ['project_id', 'private_key', 'client_email'];
-        for (const field of requiredFields) {
-            if (!serviceAccount[field]) {
-                throw new Error(`Missing required field: ${field}`);
-            }
-        }
-
-        // Clean private key formatting
-        const privateKey = serviceAccount.private_key
-            .replace(/\\n/g, '\n')
-            .replace(/""/g, '"');
-
-        // Initialize with explicit error handling
-        if (admin.apps.length) {
-            await admin.app().delete();
-        }
-
-        admin.initializeApp({
-            credential: admin.credential.cert({
-                projectId: serviceAccount.project_id,
-                clientEmail: serviceAccount.client_email,
-                privateKey: privateKey
-            })
-        });
-
-        // Verify initialization
-        try {
-            await admin.app().getToken();
-            console.log('Firebase Admin SDK initialized and authenticated successfully');
-        } catch (error) {
-            throw new Error(`Authentication verification failed: ${error.message}`);
-        }
-
-        return admin.messaging();
-    } catch (error) {
-        console.error('Firebase initialization failed:', {
-            name: error.name,
-            message: error.message,
-            stack: error.stack
-        });
-        throw error;
-    }
-};
-
-// Export the initialization function and messaging
-module.exports = {
-    initializeFirebase,
-    getMessaging: () => admin.messaging()
-};
 
 // MongoDB connection with retry logic
 const connectDB = async (retries = 5) => {
