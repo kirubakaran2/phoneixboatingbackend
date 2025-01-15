@@ -297,7 +297,7 @@ app.post('/api/email', async (req, res) => {
     }
 });
 
-app.get('/api/emails', verifyToken, async (req, res) => {
+app.get('/api/email', verifyToken, async (req, res) => {
     try {
         const emails = await Email.find().sort({ createdAt: -1 });
         res.json({ success: true, emails });
