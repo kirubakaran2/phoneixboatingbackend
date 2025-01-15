@@ -3,305 +3,123 @@ const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
-const admin = require('firebase-admin');
-
-try {
-    // Read the service account from the environment variable
-    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
-
-    if (!serviceAccountRaw) {
-        throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is not set');
-    }
-
-    const serviceAccount = JSON.parse(serviceAccountRaw);
-    
-    // Log some non-sensitive details for verification
-    console.log('Loading service account for project:', serviceAccount.project_id);
-    
-    // Ensure the private key is properly formatted
-    if (serviceAccount.private_key.includes('\\n')) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-    }
-    
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: serviceAccount.project_id,
-            clientEmail: serviceAccount.client_email,
-            privateKey: serviceAccount.private_key
-        })
-    });
-    
-    console.log('Firebase Admin SDK initialized successfully');
-} catch (error) {
-    console.error('Firebase initialization error:', {
-        name: error.name,
-        message: error.message,
-        stack: error.stack
-    });
-    process.exit(1);
-}
-
-const messaging = admin.messaging();
+const webPush = require('web-push');
 
 const app = express();
 
-// Enhanced CORS configuration with error handling
+// Middleware to parse JSON and enable CORS
+app.use(express.json());
 app.use(cors({
     origin: ['http://localhost:5173', 'https://newphoenixboating.vercel.app', 'https://newphoenixboating.in', 'https://www.newphoenixboating.in'],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
-    maxAge: 86400 // CORS preflight cache time
+    allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.use(express.json());
+// Connect to MongoDB
+mongoose.connect('mongodb+srv://kiruba:kirubakaran23@creeper.fg9oh.mongodb.net/', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+})
+.then(() => console.log('MongoDB connected successfully'))
+.catch(err => console.log('MongoDB connection error:', err));
 
-// MongoDB connection with retry logic
-const connectDB = async (retries = 5) => {
-    while (retries) {
-        try {
-            await mongoose.connect('mongodb+srv://kiruba:kirubakaran23@creeper.fg9oh.mongodb.net/', {
-                useNewUrlParser: true,
-                useUnifiedTopology: true
-            });
-            console.log('MongoDB connected successfully');
-            break;
-        } catch (err) {
-            console.error('MongoDB connection error:', err);
-            retries -= 1;
-            if (!retries) process.exit(1);
-            console.log(`Retrying connection... ${retries} attempts remaining`);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
-    }
-};
-
-connectDB();
-
-// Enhanced schemas with timestamps and indexes
+// Define schemas
 const bookingSchema = new mongoose.Schema({
-    name: { type: String, required: true, index: true },
-    date: { type: Date, required: true, index: true },
+    name: { type: String, required: true },
+    date: { type: Date, required: true },
     timeSlot: { type: String, required: true },
     phoneNumber: { type: String, required: true },
-    status: { 
-        type: String, 
-        enum: ['pending', 'confirmed', 'cancelled'],
-        default: 'pending'
-    }
-}, { timestamps: true });
+    createdAt: { type: Date, default: Date.now }
+});
 
 const emailSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    email: { type: String, required: true, index: true },
+    email: { type: String, required: true },
     message: { type: String, required: true },
-    status: { 
-        type: String, 
-        enum: ['unread', 'read'],
-        default: 'unread'
-    }
-}, { timestamps: true });
-
-const deviceTokenSchema = new mongoose.Schema({
-    token: { 
-        type: String, 
-        required: true, 
-        unique: true,
-        index: true 
-    },
-    userAgent: String,
-    lastActive: { type: Date, default: Date.now },
-    isValid: { type: Boolean, default: true }
-}, { timestamps: true });
-
-const notificationLogSchema = new mongoose.Schema({
-    type: { type: String, required: true },
-    referenceId: { type: mongoose.Schema.Types.ObjectId, required: true },
-    title: String,
-    body: String,
-    status: { 
-        type: String,
-        enum: ['pending', 'sent', 'failed'],
-        default: 'pending'
-    },
-    error: String,
-    retryCount: { type: Number, default: 0 }
-}, { 
-    timestamps: true,
-    expires: 86400 // TTL index
+    createdAt: { type: Date, default: Date.now }
 });
 
+const subscriptionSchema = new mongoose.Schema({
+    endpoint: { type: String, required: true, unique: true },
+    keys: {
+        auth: { type: String, required: true },
+        p256dh: { type: String, required: true }
+    },
+    userAgent: String,
+    createdAt: { type: Date, default: Date.now }
+});
+
+const notificationLogSchema = new mongoose.Schema({
+    type: { type: String, required: true }, // 'booking' or 'email'
+    referenceId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    createdAt: { type: Date, default: Date.now, expires: 86400 }
+});
+
+// Create models
 const Booking = mongoose.model('Booking', bookingSchema);
 const Email = mongoose.model('Email', emailSchema);
-const DeviceToken = mongoose.model('DeviceToken', deviceTokenSchema);
+const Subscription = mongoose.model('Subscription', subscriptionSchema);
 const NotificationLog = mongoose.model('NotificationLog', notificationLogSchema);
+// VAPID keys
+const vapidKeys = {
+    publicKey: 'BJSGv5raHxSFIvnQB493vrLqXCtGnpLfm1Yzw4nS9X67d4nh6pktfHewpyzajnAR0VjHg8G6qrKPeldQUqf13s0',
+    privateKey: 'ddpS5YH5KbzryZcj5_h3tPyF05u-Q-FzGnTuSOjssd0'
+};
 
-// Enhanced notification service with retry logic and batch processing
-class NotificationService {
-    static async sendNotification(type, title, body, referenceId, retryCount = 3) {
-        try {
-            // Check for duplicate notifications within a time window
-            const recentNotification = await NotificationLog.findOne({
-                type,
-                referenceId,
-                createdAt: { $gte: new Date(Date.now() - 5 * 60 * 1000) }
-            });
+// Set VAPID details
+webPush.setVapidDetails(
+    'mailto:kirubakaran003k2@gmail.com', // Your email
+    vapidKeys.publicKey,
+    vapidKeys.privateKey
+);
 
-            if (recentNotification) {
-                console.log('Duplicate notification prevented');
-                return;
-            }
-
-            // Create notification log
-            const notificationLog = await NotificationLog.create({
-                type,
-                referenceId,
-                title,
-                body,
-                status: 'pending'
-            });
-
-            // Get valid device tokens
-            const devices = await DeviceToken.find({ isValid: true });
-            if (!devices.length) {
-                console.log('No valid devices found');
-                return;
-            }
-
-            // Validate tokens before sending
-            const tokens = devices.map(device => device.token).filter(token => {
-                // Basic token validation
-                if (!token || token.length < 100) {
-                    console.log('Invalid token format:', token);
-                    return false;
-                }
-                return true;
-            });
-
-            console.log(`Attempting to send notifications to ${tokens.length} devices`);
-
-            // Process tokens in batches of 500
-            for (let i = 0; i < tokens.length; i += 500) {
-                const batch = tokens.slice(i, i + 500);
-                
-                // Create message objects for each token
-                const messages = batch.map(token => {
-                    console.log('Preparing message for token:', token);
-                    return {
-                        token,
-                        notification: { 
-                            title, 
-                            body 
-                        },
-                        data: {
-                            type,
-                            referenceId: referenceId.toString(),
-                            timestamp: Date.now().toString()
-                        },
-                        android: {
-                            priority: 'high',
-                            notification: {
-                                clickAction: 'FLUTTER_NOTIFICATION_CLICK'
-                            }
-                        },
-                        apns: {
-                            headers: {
-                                'apns-priority': '10'
-                            },
-                            payload: {
-                                aps: {
-                                    contentAvailable: true,
-                                    alert: {
-                                        title,
-                                        body
-                                    }
-                                }
-                            }
-                        }
-                    };
-                });
-
-                try {
-                    console.log(`Sending batch of ${messages.length} messages...`);
-                    const response = await messaging.sendEach(messages);
-
-                    // Detailed response logging
-                    console.log('Batch response:', {
-                        successCount: response.successCount,
-                        failureCount: response.failureCount
-                    });
-
-                    // Handle failed tokens
-                    if (response.failureCount > 0) {
-                        const failedTokens = [];
-                        response.responses.forEach((resp, idx) => {
-                            if (!resp.success) {
-                                const failedToken = batch[idx];
-                                failedTokens.push(failedToken);
-                                console.log('Failure details:', {
-                                    token: failedToken,
-                                    error: resp.error
-                                });
-
-                                if (resp.error.code === 'messaging/invalid-registration-token' ||
-                                    resp.error.code === 'messaging/registration-token-not-registered') {
-                                    console.log('Invalidating token:', failedToken);
-                                    DeviceToken.findOneAndUpdate(
-                                        { token: failedToken },
-                                        { isValid: false },
-                                        { new: true }
-                                    ).exec().then(result => {
-                                        console.log('Token invalidation result:', result);
-                                    });
-                                }
-                            }
-                        });
-                        console.log('Failed tokens:', failedTokens);
-                    }
-
-                    console.log(`Successfully sent ${response.successCount} messages in batch`);
-                } catch (error) {
-                    console.error('Batch send error:', {
-                        code: error.code,
-                        message: error.message,
-                        stack: error.stack,
-                        details: error.errorInfo
-                    });
-                }
-            }
-
-            // Update notification log
-            await notificationLog.updateOne({
-                status: 'sent',
-                $set: { updatedAt: new Date() }
-            });
-
-        } catch (error) {
-            console.error('Notification service error:', {
-                code: error.code,
-                message: error.message,
-                stack: error.stack,
-                details: error.errorInfo
-            });
-            
-            const notificationLog = await NotificationLog.findOne({ type, referenceId });
-            if (notificationLog && notificationLog.retryCount < retryCount) {
-                const delay = Math.pow(2, notificationLog.retryCount) * 1000;
-                setTimeout(() => {
-                    NotificationService.sendNotification(type, title, body, referenceId, retryCount);
-                }, delay);
-                
-                await notificationLog.updateOne({
-                    $inc: { retryCount: 1 },
-                    $set: { error: error.message }
-                });
-            }
-        }
-    }
-}
+// Generate JWT Token
 const generateToken = (email) => {
     return jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '24h' });
 };
+
+async function sendNotification(type, title, body, referenceId) {
+    try {
+        // Check for duplicate notification
+        const existingLog = await NotificationLog.findOne({ type, referenceId });
+        if (existingLog) {
+            console.log('Duplicate notification prevented');
+            return;
+        }
+
+        const subscriptions = await Subscription.find();
+        const payload = JSON.stringify({
+            title,
+            body,
+            timestamp: Date.now(),
+            type,
+            referenceId: referenceId.toString()
+        });
+
+        // Send to all valid subscriptions
+        const sendPromises = subscriptions.map(async subscription => {
+            try {
+                await webPush.sendNotification(subscription, payload);
+            } catch (error) {
+                if (error.statusCode === 410 || error.statusCode === 404) {
+                    // Remove invalid subscription
+                    await Subscription.deleteOne({ _id: subscription._id });
+                }
+                console.error(`Notification error: ${error.message}`);
+            }
+        });
+
+        await Promise.all(sendPromises);
+
+        // Log successful notification
+        await new NotificationLog({ type, referenceId }).save();
+        
+    } catch (error) {
+        console.error('Notification error:', error);
+    }
+}
+
+// Login endpoint to authenticate and generate token
 app.post('/api/signin', async (req, res) => {
     const { email, password } = req.body;
 
@@ -324,52 +142,7 @@ app.post('/api/signin', async (req, res) => {
     });
 });
 
-// Token registration endpoint with validation
-app.post('/api/register-device', async (req, res) => {
-    try {
-        const { token } = req.body;
-        const userAgent = req.headers['user-agent'];
-
-        if (!token) {
-            return res.status(400).json({ success: false, message: 'Token is required' });
-        }
-
-        await DeviceToken.findOneAndUpdate(
-            { token },
-            { 
-                token,
-                userAgent,
-                lastActive: new Date(),
-                isValid: true
-            },
-            { upsert: true, new: true }
-        );
-
-        res.status(201).json({ success: true });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Enhanced booking endpoint with notification
-app.post('/api/bookings', async (req, res) => {
-    try {
-        const booking = new Booking(req.body);
-        await booking.save();
-
-        // Send notification asynchronously
-        NotificationService.sendNotification(
-            'booking',
-            'New Booking Received',
-            `${booking.name} booked for ${new Date(booking.date).toLocaleDateString()} at ${booking.timeSlot}`,
-            booking._id
-        );
-
-        res.status(201).json({ success: true, booking });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
+// Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
     const token = req.headers['authorization']?.split(' ')[1];
 
@@ -384,12 +157,116 @@ const verifyToken = (req, res, next) => {
         return res.status(401).json({ success: false, message: 'Invalid or expired token' });
     }
 };
+
+// Subscription endpoint
+app.post('/api/subscribe', async (req, res) => {
+    try {
+        const subscription = req.body;
+        const userAgent = req.headers['user-agent'];
+
+        await Subscription.findOneAndUpdate(
+            { endpoint: subscription.endpoint },
+            { ...subscription, userAgent },
+            { upsert: true, new: true }
+        );
+
+        res.status(201).json({ success: true });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Email endpoints
+app.post('/api/email', async (req, res) => {
+    try {
+        const { name, email, message } = req.body;
+
+        const emailEntry = new Email({
+            name,
+            email,
+            message
+        });
+
+        await emailEntry.save();
+
+        // Send push notification
+        const subscriptions = await Subscription.find();
+        const payload = JSON.stringify({ title: 'New Email', body: `You have a new message from ${name}` });
+
+        subscriptions.forEach(subscription => {
+            webPush.sendNotification(subscription, payload).catch(err => console.error('Error sending notification:', err));
+        });
+
+        res.status(201).json({
+            success: true,
+            message: 'Email entry created successfully',
+            emailEntry
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error creating email entry',
+            error: error.message
+        });
+    }
+});
+
+// Booking endpoints
+app.post('/api/bookings', async (req, res) => {
+    try {
+        const booking = new Booking(req.body);
+        await booking.save();
+
+        await sendNotification(
+            'booking',
+            'New Booking Received',
+            `${booking.name} booked for ${new Date(booking.date).toLocaleDateString()} at ${booking.timeSlot}`,
+            booking._id
+        );
+
+        res.status(201).json({ success: true, booking });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 app.get('/api/bookings', verifyToken, async (req, res) => {
     try {
         const bookings = await Booking.find().sort({ date: 1 });
         res.json({ success: true, bookings });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Update booking endpoint (requires authentication)
+app.put('/api/bookings/:id', verifyToken, async (req, res) => {
+    try {
+        const { name, date, timeSlot, phoneNumber } = req.body;
+        
+        const booking = await Booking.findByIdAndUpdate(
+            req.params.id,
+            { name, date, timeSlot, phoneNumber },
+            { new: true } // Return updated document
+        );
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: 'Booking not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: 'Booking updated successfully',
+            booking
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: 'Error updating booking',
+            error: error.message
+        });
     }
 });
 app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
@@ -400,7 +277,27 @@ app.delete('/api/bookings/:id', verifyToken, async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-app.get('/api/email', verifyToken, async (req, res) => {
+
+// Email Routes
+app.post('/api/email', async (req, res) => {
+    try {
+        const email = new Email(req.body);
+        await email.save();
+
+        await sendNotification(
+            'email',
+            'New Message Received',
+            `New message from ${email.name} (${email.email})`,
+            email._id
+        );
+
+        res.status(201).json({ success: true, email });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/emails', verifyToken, async (req, res) => {
     try {
         const emails = await Email.find().sort({ createdAt: -1 });
         res.json({ success: true, emails });
@@ -418,46 +315,7 @@ app.delete('/api/emails/:id', verifyToken, async (req, res) => {
     }
 });
 
-// Enhanced email endpoint with notification
-app.post('/api/email', async (req, res) => {
-    try {
-        const { name, email, message } = req.body;
-        const emailEntry = new Email({ name, email, message });
-        await emailEntry.save();
-
-        NotificationService.sendNotification(
-            'email',
-            'New Email Received',
-            `New message from ${name}`,
-            emailEntry._id
-        );
-
-        res.status(201).json({ success: true, emailEntry });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Keep existing routes...
-// [Previous routes remain unchanged]
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({
-        success: false,
-        message: 'Internal server error',
-        error: process.env.NODE_ENV === 'development' ? err.message : undefined
-    });
-});
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-    console.log('Received SIGTERM. Performing graceful shutdown...');
-    await mongoose.connection.close();
-    process.exit(0);
-});
-
+// Server startup
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
